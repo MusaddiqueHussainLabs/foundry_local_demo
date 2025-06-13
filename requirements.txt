@@ -1,2 +1,3 @@
-openai
+langchain[openai]
 foundry-local-sdk
+botbuilder-integration-aiohttp

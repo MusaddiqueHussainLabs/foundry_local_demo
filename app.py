@@ -1,53 +1,87 @@
-# import openai
-# from foundry_local import FoundryLocalManager
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
 
-# # By using an alias, the most suitable model will be downloaded 
-# # to your end-user's device. 
-# alias = "phi-3.5-mini"
+import sys
+import traceback
+from datetime import datetime
 
-# # Create a FoundryLocalManager instance. This will start the Foundry
-# # Local service if it is not already running and load the specified model.
-# manager = FoundryLocalManager(alias)
-# # The remaining code uses the OpenAI Python SDK to interact with the local model.
-# # Configure the client to use the local Foundry service
-# client = openai.OpenAI(
-#     base_url=manager.endpoint,
-#     api_key=manager.api_key  # API key is not required for local usage
-# )
-# # Set the model to use and generate a response
-# response = client.chat.completions.create(
-#     model=manager.get_model_info(alias).id,
-#     messages=[{"role": "user", "content": "What is machine learning"}]
-# )
-# print(response.choices[0].message.content)
-
-import openai
-from foundry_local import FoundryLocalManager
-
-# By using an alias, the most suitable model will be downloaded 
-# to your end-user's device.
-alias = "phi-3.5-mini"
-
-# Create a FoundryLocalManager instance. This will start the Foundry 
-# Local service if it is not already running and load the specified model.
-manager = FoundryLocalManager(alias)
-
-# The remaining code us es the OpenAI Python SDK to interact with the local model.
-
-# Configure the client to use the local Foundry service
-client = openai.OpenAI(
-    base_url=manager.endpoint,
-    api_key=manager.api_key  # API key is not required for local usage
+from aiohttp import web
+from aiohttp.web import Request, Response, json_response
+from botbuilder.core import (
+    BotFrameworkAdapterSettings,
+    TurnContext,
+    BotFrameworkAdapter,
 )
+from botbuilder.core.integration import aiohttp_error_middleware
+from botbuilder.schema import Activity, ActivityTypes
 
-# Set the model to use and generate a streaming response
-stream = client.chat.completions.create(
-    model=manager.get_model_info(alias).id,
-    messages=[{"role": "user", "content": "What is machine learning?"}],
-    stream=True
-)
+from bot import MyBot
+from config import DefaultConfig
 
-# Print the streaming response
-for chunk in stream:
-    if chunk.choices[0].delta.content is not None:
-        print(chunk.choices[0].delta.content, end="", flush=True)
+CONFIG = DefaultConfig()
+
+# Create adapter.
+# See https://aka.ms/about-bot-adapter to learn more about how bots work.
+SETTINGS = BotFrameworkAdapterSettings(CONFIG.APP_ID, CONFIG.APP_PASSWORD)
+ADAPTER = BotFrameworkAdapter(SETTINGS)
+
+
+# Catch-all for errors.
+async def on_error(context: TurnContext, error: Exception):
+    # This check writes out errors to console log .vs. app insights.
+    # NOTE: In production environment, you should consider logging this to Azure
+    #       application insights.
+    print(f"\n [on_turn_error] unhandled error: {error}", file=sys.stderr)
+    traceback.print_exc()
+
+    # Send a message to the user
+    await context.send_activity("The bot encountered an error or bug.")
+    await context.send_activity(
+        "To continue to run this bot, please fix the bot source code."
+    )
+    # Send a trace activity if we're talking to the Bot Framework Emulator
+    if context.activity.channel_id == "emulator":
+        # Create a trace activity that contains the error object
+        trace_activity = Activity(
+            label="TurnError",
+            name="on_turn_error Trace",
+            timestamp=datetime.utcnow(),
+            type=ActivityTypes.trace,
+            value=f"{error}",
+            value_type="https://www.botframework.com/schemas/error",
+        )
+        # Send a trace activity, which will be displayed in Bot Framework Emulator
+        await context.send_activity(trace_activity)
+
+
+ADAPTER.on_turn_error = on_error
+
+# Create the Bot
+BOT = MyBot()
+
+
+# Listen for incoming requests on /api/messages
+async def messages(req: Request) -> Response:
+    # Main bot message handler.
+    if "application/json" in req.headers["Content-Type"]:
+        body = await req.json()
+    else:
+        return Response(status=415)
+
+    activity = Activity().deserialize(body)
+    auth_header = req.headers["Authorization"] if "Authorization" in req.headers else ""
+
+    response = await ADAPTER.process_activity(activity, auth_header, BOT.on_turn)
+    if response:
+        return json_response(data=response.body, status=response.status)
+    return Response(status=201)
+
+
+APP = web.Application(middlewares=[aiohttp_error_middleware])
+APP.router.add_post("/api/messages", messages)
+
+if __name__ == "__main__":
+    try:
+        web.run_app(APP, host="localhost", port=CONFIG.PORT)
+    except Exception as error:
+        raise error
